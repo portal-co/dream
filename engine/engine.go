@@ -10,12 +10,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io/ioutil"
 	"os"
 	"os/exec"
 	"strings"
 	"sync"
+	"unicode"
 
+	"github.com/DataDog/hyperloglog"
 	"github.com/robertkrimen/otto"
 	"github.com/robertkrimen/otto/registry"
 	_ "github.com/robertkrimen/otto/underscore"
@@ -70,10 +73,20 @@ func HashSlice(sl []string, sum []byte) []byte {
 	return s.Sum(sum)
 }
 
+func HashFnv(s string) uint32 {
+	h := fnv.New32a()
+	h.Write([]byte(s))
+	return h.Sum32()
+}
+
 type Cache struct {
-	Local      map[string]map[string][]byte
-	FileFolder *string
-	Lock       sync.Mutex
+	Local       map[string]map[string][]byte
+	FileFolder  *string
+	Lock        sync.Mutex
+	ActionHits  *hyperloglog.HyperLogLog
+	ActionTotal *hyperloglog.HyperLogLog
+	Hits        *hyperloglog.HyperLogLog
+	Total       *hyperloglog.HyperLogLog
 }
 
 func (c *Cache) Activate(hs string) {
@@ -124,7 +137,37 @@ func (c *Cache) Sync() {
 	}
 }
 
-func SetupVM(v *otto.Otto, m map[string]*Target, b string, h chan string, cache *Cache, proc chan bool, idx chan *string) {
+func SafeDiv[T float32 | float64](a, b T) T {
+	if a == b {
+		return 1
+	}
+	if b == 0 {
+		return -1
+	}
+	return a / b
+}
+
+func (c *Cache) Incrementality() float64 {
+	a := SafeDiv(float64(c.ActionHits.Count()), float64(c.ActionTotal.Count()))
+	b := SafeDiv(float64(c.Hits.Count()), float64(c.Total.Count()))
+	if a == -1 || b == -1 {
+		return -1
+	}
+	return (a + b) / 2
+}
+
+func IsMostlyInCharset(s string, c *unicode.RangeTable) bool {
+	r := []rune(s)
+	x := 0
+	for _, l := range r {
+		if unicode.In(l, c) {
+			x++
+		}
+	}
+	return x > len(r)/2
+}
+
+func SetupVM(v *otto.Otto, m map[string]*Target, b string, h chan string, cache *Cache, proc chan bool, idx chan *string, cfg []string) {
 	v.Set("dependOn", func(call otto.FunctionCall) otto.Value {
 		rx := make([][]byte, len(call.ArgumentList))
 		c := make(chan bool)
@@ -172,6 +215,7 @@ func SetupVM(v *otto.Otto, m map[string]*Target, b string, h chan string, cache 
 	v.Set("exec", func(call otto.FunctionCall) otto.Value {
 		h := sha256.New()
 		gob.NewEncoder(h).Encode(call)
+		h.Write(HashSlice(cfg, []byte("dream!cfg")))
 		hs := base64.StdEncoding.EncodeToString(h.Sum([]byte("dream!action")))
 		p := make(map[string][]byte)
 		defer func() {
@@ -180,8 +224,10 @@ func SetupVM(v *otto.Otto, m map[string]*Target, b string, h chan string, cache 
 			cache.Local[hs] = p
 		}()
 		cache.Lock.Lock()
+		cache.ActionTotal.Add(HashFnv(hs))
 		if cache.Local[hs] != nil {
 			p = cache.Local[hs]
+			cache.ActionHits.Add(HashFnv(hs))
 			cache.Lock.Unlock()
 		} else {
 			cache.Lock.Unlock()
@@ -230,6 +276,7 @@ func SetupVM(v *otto.Otto, m map[string]*Target, b string, h chan string, cache 
 		y, _ := v.ToValue(string(x.([]byte)))
 		return y
 	})
+
 }
 func BuildFile(x string) string {
 	s := strings.Split(x, ":")
@@ -239,7 +286,7 @@ func InjectTarget(x, y string) string {
 	s := strings.Split(x, "/")
 	return strings.Join(s[:len(s)-2], "/") + y
 }
-func Build(m map[string]*Target, x string, h chan string, cache *Cache, proc chan bool, idx chan *string) {
+func Build(m map[string]*Target, x string, h chan string, cache *Cache, proc chan bool, idx chan *string, cfg []string) {
 	if tt, ok := m[x]; ok {
 		x := <-tt.Done
 		go func() {
@@ -250,6 +297,7 @@ func Build(m map[string]*Target, x string, h chan string, cache *Cache, proc cha
 	b := DependOn(m, BuildFile(x), h, BuildFile(BuildFile(x)))
 	hash := sha256.New()
 	hash.Write(b.Content)
+	hash.Write(HashSlice(cfg, []byte("dream!cfg")))
 	hash.Write([]byte(x))
 	hs := base64.StdEncoding.EncodeToString(hash.Sum([]byte("dream!build")))
 	defer func() {
@@ -257,8 +305,10 @@ func Build(m map[string]*Target, x string, h chan string, cache *Cache, proc cha
 			m[x].Done <- true
 		}()
 	}()
+	cache.Total.Add(HashFnv(hs))
 	if k, ok := cache.Get(hs, "#Main"); ok {
 		m[x] = &Target{Done: make(chan bool), Name: x, Content: k}
+		cache.Hits.Add(HashFnv(hs))
 		return
 	}
 	defer func() {
@@ -268,7 +318,7 @@ func Build(m map[string]*Target, x string, h chan string, cache *Cache, proc cha
 	}()
 	if b.VM == nil {
 		v := otto.New()
-		SetupVM(v, m, b.Name, h, cache, proc, idx)
+		SetupVM(v, m, b.Name, h, cache, proc, idx, cfg)
 		b.VM = v
 	}
 	g, _ := b.VM.Get("Build")
@@ -277,9 +327,9 @@ func Build(m map[string]*Target, x string, h chan string, cache *Cache, proc cha
 	m[x] = &Target{Done: make(chan bool), Name: x, Content: y.([]byte)}
 }
 
-func BuildLoop(m map[string]*Target, h chan string, cache *Cache, proc chan bool, idx chan *string) {
+func BuildLoop(m map[string]*Target, h chan string, cache *Cache, proc chan bool, idx chan *string, cfg []string) {
 	for {
 		w := <-h
-		Build(m, w, h, cache, proc, idx)
+		Build(m, w, h, cache, proc, idx, cfg)
 	}
 }

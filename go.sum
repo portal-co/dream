@@ -1,3 +1,5 @@
+github.com/DataDog/hyperloglog v0.0.0-20220214164406-974598347557 h1:t+/ZxFkPEVJYvbKbk4suUhKFuCy3C8rg3tuP6Oj/Zyk=
+github.com/DataDog/hyperloglog v0.0.0-20220214164406-974598347557/go.mod h1:hFPkswc42pKhRbeKDKXy05mRi7J1kJ2vMNbvd9erH0M=
 github.com/chzyer/logex v1.1.10/go.mod h1:+Ywpsq7O8HXn0nuIou7OrIPyXbp3wmkHB+jjWRnGsAI=
 github.com/chzyer/test v0.0.0-20180213035817-a1ea475d72b1/go.mod h1:Q3SI9o4m/ZMnBNeIyt5eFwwo7qiLfzFZmjNmxjkiQlU=
 github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
