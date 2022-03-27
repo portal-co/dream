@@ -1,8 +1,6 @@
 package engine
 
 import (
-	"bufio"
-	"bytes"
 	"compress/gzip"
 	"crypto/sha256"
 	"encoding/base64"
@@ -256,21 +254,23 @@ func SetupVM(v *otto.Otto, m map[string]*Target, b string, h chan string, cache 
 		r, _ := v.ToValue(p)
 		return r
 	})
-	v.Set("makeGob", func(call otto.FunctionCall) otto.Value {
-		x, _ := call.Argument(0).Export()
-		var s bytes.Buffer
-		gob.NewEncoder(bufio.NewWriter(&s)).Encode(x)
-		r, _ := v.ToValue(s.Bytes())
-		return r
-	})
-	v.Set("extractGob", func(call otto.FunctionCall) otto.Value {
-		x, _ := call.Argument(0).Export()
-		s := bytes.NewBuffer(x.([]byte))
-		var i interface{}
-		gob.NewDecoder(s).Decode(i)
-		r, _ := v.ToValue(i)
-		return r
-	})
+	/*
+		v.Set("makeGob", func(call otto.FunctionCall) otto.Value {
+			x, _ := call.Argument(0).Export()
+			var s bytes.Buffer
+			gob.NewEncoder(bufio.NewWriter(&s)).Encode(x)
+			r, _ := v.ToValue(s.Bytes())
+			return r
+		})
+		v.Set("extractGob", func(call otto.FunctionCall) otto.Value {
+			x, _ := call.Argument(0).Export()
+			s := bytes.NewBuffer(x.([]byte))
+			var i interface{}
+			gob.NewDecoder(s).Decode(i)
+			r, _ := v.ToValue(i)
+			return r
+		})
+	*/
 	v.Set("barray2string", func(call otto.FunctionCall) otto.Value {
 		x, _ := call.Argument(0).Export()
 		y, _ := v.ToValue(string(x.([]byte)))

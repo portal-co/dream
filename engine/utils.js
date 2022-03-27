@@ -13,3 +13,9 @@ function package(target){
     s.pop()
     return s.join(':')
 }
+function makeGob(x){
+    return string2barray(JSON.stringify(x))
+}
+function extractGob(x){
+    return JSON.parse(barray2string(x))
+}
