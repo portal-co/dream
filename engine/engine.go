@@ -9,7 +9,6 @@ import (
 	"encoding/gob"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"hash/fnv"
 	"io/ioutil"
 	"os"
@@ -168,6 +167,7 @@ func IsMostlyInCharset(s string, c *unicode.RangeTable) bool {
 }
 
 func SetupVM(v *otto.Otto, m map[string]*Target, b string, h chan string, cache *Cache, proc chan bool, idx chan *string, cfg []string) {
+
 	v.Set("dependOn", func(call otto.FunctionCall) otto.Value {
 		rx := make([][]byte, len(call.ArgumentList))
 		c := make(chan bool)
@@ -234,7 +234,7 @@ func SetupVM(v *otto.Otto, m map[string]*Target, b string, h chan string, cache 
 			proc <- true
 			id := <-idx
 			defer func() { <-proc; idx <- id }()
-			*id = fmt.Sprintf("Build %s:%s", b, hs)
+			//*id = fmt.Sprintf("Build %s:%s", b, hs)
 			cmd, _ := call.Argument(0).ToString()
 			sd, _ := os.MkdirTemp(os.TempDir(), "dream-**")
 			defer os.RemoveAll(sd)
@@ -294,42 +294,48 @@ func Build(m map[string]*Target, x string, h chan string, cache *Cache, proc cha
 		}()
 		return
 	}
-	b := DependOn(m, BuildFile(x), h, BuildFile(BuildFile(x)))
-	hash := sha256.New()
-	hash.Write(b.Content)
-	hash.Write(HashSlice(cfg, []byte("dream!cfg")))
-	hash.Write([]byte(x))
-	hs := base64.StdEncoding.EncodeToString(hash.Sum([]byte("dream!build")))
-	defer func() {
-		go func() {
-			m[x].Done <- true
+	if strings.Contains(x, ":") {
+		b := DependOn(m, BuildFile(x), h, BuildFile(BuildFile(x)))
+		hash := sha256.New()
+		hash.Write(b.Content)
+		hash.Write(HashSlice(cfg, []byte("dream!cfg")))
+		hash.Write([]byte(x))
+		hs := base64.StdEncoding.EncodeToString(hash.Sum([]byte("dream!build")))
+		defer func() {
+			go func() {
+				m[x].Done <- true
+			}()
 		}()
-	}()
-	cache.Total.Add(HashFnv(hs))
-	if k, ok := cache.Get(hs, "#Main"); ok {
-		m[x] = &Target{Done: make(chan bool), Name: x, Content: k}
-		cache.Hits.Add(HashFnv(hs))
-		return
+		cache.Total.Add(HashFnv(hs))
+		if k, ok := cache.Get(hs, "#Main"); ok {
+			m[x] = &Target{Done: make(chan bool), Name: x, Content: k}
+			cache.Hits.Add(HashFnv(hs))
+			return
+		}
+		defer func() {
+			cache.Lock.Lock()
+			defer cache.Lock.Unlock()
+			cache.Local[hs]["#Main"] = m[x].Content
+		}()
+		if b.VM == nil {
+			v := otto.New()
+			SetupVM(v, m, b.Name, h, cache, proc, idx, cfg)
+			b.VM = v
+		}
+		g, _ := b.VM.Get("Build")
+		r, _ := g.Call(b.VM.ToValue(x))
+		y, _ := r.Export()
+		m[x] = &Target{Done: make(chan bool), Name: x, Content: y.([]byte)}
+	} else {
+		y := "./" + x[2:]
+		f, _ := ioutil.ReadFile(y)
+		m[x] = &Target{Done: make(chan bool), Name: x, Content: f}
 	}
-	defer func() {
-		cache.Lock.Lock()
-		defer cache.Lock.Unlock()
-		cache.Local[hs]["#Main"] = m[x].Content
-	}()
-	if b.VM == nil {
-		v := otto.New()
-		SetupVM(v, m, b.Name, h, cache, proc, idx, cfg)
-		b.VM = v
-	}
-	g, _ := b.VM.Get("Build")
-	r, _ := g.Call(b.VM.ToValue(x))
-	y, _ := r.Export()
-	m[x] = &Target{Done: make(chan bool), Name: x, Content: y.([]byte)}
 }
 
 func BuildLoop(m map[string]*Target, h chan string, cache *Cache, proc chan bool, idx chan *string, cfg []string) {
 	for {
 		w := <-h
-		Build(m, w, h, cache, proc, idx, cfg)
+		go Build(m, w, h, cache, proc, idx, cfg)
 	}
 }

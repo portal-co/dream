@@ -1,0 +1,6 @@
+function Build(x){
+    if(localPath(x) == 'rules.js'){
+        eval(curl('https://unpkg.com/@babel/standalone/babel.min.js'))
+        return string2barray(Babel.transform(barray2string(dependOn("//lib/rules_.js")[0]),{presets: ["env"]}).code)
+    }
+}
