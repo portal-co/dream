@@ -4,9 +4,9 @@ import (
 	"compress/gzip"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/gob"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"hash/fnv"
 	"io/ioutil"
 	"os"
@@ -34,14 +34,79 @@ type Target struct {
 	VM      *otto.Otto
 }
 
+func Merge(x1, x2 interface{}) (interface{}, error) {
+	data1, err := json.Marshal(x1)
+	if err != nil {
+		return nil, err
+	}
+	data2, err := json.Marshal(x2)
+	if err != nil {
+		return nil, err
+	}
+	var j1 interface{}
+	err = json.Unmarshal(data1, &j1)
+	if err != nil {
+		return nil, err
+	}
+	var j2 interface{}
+	err = json.Unmarshal(data2, &j2)
+	if err != nil {
+		return nil, err
+	}
+	return merge1(j1, j2), nil
+}
+
+func merge1(x1, x2 interface{}) interface{} {
+	switch x1 := x1.(type) {
+	case map[string]interface{}:
+		x2, ok := x2.(map[string]interface{})
+		if !ok {
+			return x1
+		}
+		for k, v2 := range x2 {
+			if v1, ok := x1[k]; ok {
+				x1[k] = merge1(v1, v2)
+			} else {
+				x1[k] = v2
+			}
+		}
+	case nil:
+		// merge(nil, map[string]interface{...}) -> map[string]interface{...}
+		x2, ok := x2.(map[string]interface{})
+		if ok {
+			return x2
+		}
+	}
+	return x1
+}
 func DependOn(m map[string]*Target, t_ string, h chan string, in string) *Target {
-	var t string
-	if strings.HasPrefix(t_, "@") {
-		t = strings.TrimPrefix(t_, "@")
+	var t string = t_
+	again := false
+	var json0 map[string]interface{}
+	json.Unmarshal([]byte(strings.SplitN(in, "%", 2)[1]), &json0)
+	swizzle := json0["swizzle"]
+again2:
+	again = false
+	for k, v := range swizzle.(map[string]interface{}) {
+		if strings.HasPrefix(t, k) {
+			t = v.(string) + strings.TrimPrefix(t, k)
+			again = true
+		}
+	}
+	if again {
+		goto again2
+	}
+	if strings.HasPrefix(t, "@") {
+		t = strings.TrimPrefix(t, "@")
 	} else {
 		s := strings.Split(in, "//")
-		t = strings.Join(s[:len(s)-2], "//") + ":" + strings.TrimPrefix(t_, "//")
+		t = strings.Join(s[:len(s)-2], "//") + ":" + strings.TrimPrefix(t, "//")
 	}
+	var json1 map[string]interface{}
+	json.Unmarshal([]byte(strings.SplitN(t, "%", 2)[1]), &json1)
+	j2, _ := Merge(json0, json1)
+	m2, _ := json.Marshal(j2)
+	t = strings.SplitN(t, "%", 2)[0] + string(m2)
 	go func() {
 		h <- t
 	}()
@@ -188,31 +253,10 @@ func SetupVM(v *otto.Otto, m map[string]*Target, b string, h chan string, cache 
 		r, _ := v.ToValue(rx)
 		return r
 	})
-	v.Set("dependOnS", func(call otto.FunctionCall) otto.Value {
-		rx := make([]string, len(call.ArgumentList))
-		c := make(chan bool)
-		for i, a := range call.ArgumentList {
-			i := i
-			a := a
-			go func() {
-				s, _ := a.ToString()
-				if strings.HasPrefix(s, ":") {
-					s = InjectTarget(b, s)
-				}
-				u := DependOn(m, s, h, b).Content
-				rx[i] = string(u)
-				c <- true
-			}()
-		}
-		for range call.ArgumentList {
-			<-c
-		}
-		r, _ := v.ToValue(rx)
-		return r
-	})
 	v.Set("exec", func(call otto.FunctionCall) otto.Value {
 		h := sha256.New()
-		gob.NewEncoder(h).Encode(call)
+		x, _ := call.Argument(3).ToString()
+		h.Write([]byte(x))
 		h.Write(HashSlice(cfg, []byte("dream!cfg")))
 		hs := base64.StdEncoding.EncodeToString(h.Sum([]byte("dream!action")))
 		p := make(map[string][]byte)
@@ -232,7 +276,8 @@ func SetupVM(v *otto.Otto, m map[string]*Target, b string, h chan string, cache 
 			proc <- true
 			id := <-idx
 			defer func() { <-proc; idx <- id }()
-			//*id = fmt.Sprintf("Build %s:%s", b, hs)
+			m, _ := call.Argument(2).ToString()
+			*id = fmt.Sprintf("%s [Build %s:%s]", m, b, hs)
 			cmd, _ := call.Argument(0).ToString()
 			sd, _ := os.MkdirTemp(os.TempDir(), "dream-**")
 			defer os.RemoveAll(sd)
@@ -278,13 +323,22 @@ func SetupVM(v *otto.Otto, m map[string]*Target, b string, h chan string, cache 
 	})
 
 }
-func BuildFile(x string) string {
-	s := strings.Split(x, ":")
-	return strings.Join(s[:len(s)-2], ":") + "/DREAM"
+func SplitPercent(f func(string) string, x string) string {
+	a := strings.SplitN(x, "%", 2)
+	b := f(a[0])
+	return b + "%" + a[1]
 }
-func InjectTarget(x, y string) string {
-	s := strings.Split(x, "/")
-	return strings.Join(s[:len(s)-2], "/") + y
+func BuildFile(x1 string) string {
+	return SplitPercent(func(x string) string {
+		s := strings.Split(x, ":")
+		return strings.Join(s[:len(s)-2], ":") + "/DREAM"
+	}, x1)
+}
+func InjectTarget(x1, y string) string {
+	return SplitPercent(func(x string) string {
+		s := strings.Split(x, "/")
+		return strings.Join(s[:len(s)-2], "/") + y
+	}, x1)
 }
 func Build(m map[string]*Target, x string, h chan string, cache *Cache, proc chan bool, idx chan *string, cfg []string) {
 	if tt, ok := m[x]; ok {
@@ -317,15 +371,22 @@ func Build(m map[string]*Target, x string, h chan string, cache *Cache, proc cha
 			defer cache.Lock.Unlock()
 			cache.Local[hs]["#Main"] = m[x].Content
 		}()
-		if b.VM == nil {
-			v := otto.New()
-			SetupVM(v, m, b.Name, h, cache, proc, idx, cfg)
-			b.VM = v
+		s := string(b.Content)
+		l := strings.SplitN(s, "\n", 1)[0]
+		if l == "#!js" || !strings.HasPrefix(l, "#!") {
+			if b.VM == nil {
+				v := otto.New()
+				SetupVM(v, m, b.Name, h, cache, proc, idx, cfg)
+				v.Run(s)
+				b.VM = v
+			}
+			g, _ := b.VM.Get("Build")
+			r, _ := g.Call(b.VM.ToValue(x))
+			y, _ := r.Export()
+			m[x] = &Target{Done: make(chan bool), Name: x, Content: y.([]byte)}
+		} else {
+			//prog := strings.TrimPrefix(l, "#!")
 		}
-		g, _ := b.VM.Get("Build")
-		r, _ := g.Call(b.VM.ToValue(x))
-		y, _ := r.Export()
-		m[x] = &Target{Done: make(chan bool), Name: x, Content: y.([]byte)}
 	} else {
 		y := "./" + x[2:]
 		f, _ := ioutil.ReadFile(y)
