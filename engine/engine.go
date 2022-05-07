@@ -149,6 +149,8 @@ type Cache struct {
 	ActionTotal *hyperloglog.HyperLogLog
 	Hits        *hyperloglog.HyperLogLog
 	Total       *hyperloglog.HyperLogLog
+	ToDo        int
+	Done        int
 }
 
 func (c *Cache) Activate(hs string) {
@@ -230,7 +232,19 @@ func IsMostlyInCharset(s string, c *unicode.RangeTable) bool {
 }
 
 func SetupVM(v *otto.Otto, m map[string]*Target, b string, h chan string, cache *Cache, proc chan bool, idx chan *string, cfg []string) {
-
+	v.Set("reserve", func(call otto.FunctionCall) otto.Value {
+		cache.Lock.Lock()
+		defer cache.Lock.Unlock()
+		cache.ToDo++
+		x, _ := v.ToValue(func(call otto.FunctionCall) otto.Value {
+			cache.Lock.Lock()
+			defer cache.Lock.Unlock()
+			cache.Done++
+			y, _ := v.ToValue(1)
+			return y
+		})
+		return x
+	})
 	v.Set("dependOn", func(call otto.FunctionCall) otto.Value {
 		rx := make([][]byte, len(call.ArgumentList))
 		c := make(chan bool)

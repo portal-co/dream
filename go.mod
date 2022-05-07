@@ -9,5 +9,6 @@ require (
 
 require (
 	github.com/DataDog/hyperloglog v0.0.0-20220214164406-974598347557 // indirect
+	github.com/yourbasic/graph v0.0.0-20210606180040-8ecfec1c2869 // indirect
 	gopkg.in/sourcemap.v1 v1.0.5 // indirect
 )
